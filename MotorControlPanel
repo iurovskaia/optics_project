@@ -1,0 +1,81 @@
+class MotorControlPanel:
+    """Панель управления моторами"""
+
+    def __init__(self, parent, motor_controller):
+        self.parent = parent
+        self.motor = motor_controller
+        self.frame = tk.LabelFrame(parent, text="Управление моторами",
+                                   font=('Arial', 12, 'bold'),
+                                   bg='#2a2a4e', fg='white', bd=2, relief=tk.RAISED)
+        self.frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Настройка интерфейса панели моторов"""
+        status_frame = tk.Frame(self.frame, bg='#2a2a4e')
+        status_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        self.status_label = tk.Label(status_frame, text="⚫ Моторы: не подключены",
+                                     bg='#2a2a4e', fg='#ff8888', font=('Arial', 10))
+        self.status_label.pack(side=tk.LEFT)
+
+        tk.Button(status_frame, text="Подключить", command=self.connect_motors,
+                  bg='#44aa44', fg='white', font=('Arial', 9), padx=10).pack(side=tk.RIGHT, padx=5)
+
+        params_frame = tk.LabelFrame(self.frame, text="Параметры сканирования",
+                                     bg='#2a2a4e', fg='white', font=('Arial', 10))
+        params_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(params_frame, text="Точек по X:", bg='#2a2a4e', fg='white').grid(row=0, column=0, padx=5)
+        self.n1_var = tk.IntVar(value=15)
+        tk.Entry(params_frame, textvariable=self.n1_var, width=8).grid(row=0, column=1, padx=5)
+
+        tk.Label(params_frame, text="Точек по Y:", bg='#2a2a4e', fg='white').grid(row=0, column=2, padx=5)
+        self.n2_var = tk.IntVar(value=10)
+        tk.Entry(params_frame, textvariable=self.n2_var, width=8).grid(row=0, column=3, padx=5)
+
+        self.apply_btn = tk.Button(params_frame, text="Применить", command=self.apply_scan_params,
+                                   bg='#44aaff', fg='white', font=('Arial', 9))
+        self.apply_btn.grid(row=0, column=4, padx=5)
+
+        btn_frame = tk.Frame(self.frame, bg='#2a2a4e')
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Button(btn_frame, text="🏠 HOME", command=self.home_motors,
+                  bg='#44aaff', fg='white', font=('Arial', 9), width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="⏹ СТОП", command=self.stop_motors,
+                  bg='#ff4444', fg='white', font=('Arial', 9), width=10).pack(side=tk.LEFT, padx=5)
+
+    def connect_motors(self):
+        """Подключение моторов"""
+        if self.motor.connect():
+            self.status_label.config(text="🟢 Моторы: подключены", fg="#88ff88")
+            messagebox.showinfo("Успех", "Моторы подключены успешно!")
+        else:
+            messagebox.showerror("Ошибка", "Не удалось подключить моторы")
+
+    def apply_scan_params(self):
+        """Применение параметров сканирования"""
+        n1 = self.n1_var.get()
+        n2 = self.n2_var.get()
+
+        # Блокируем кнопку на время отправки
+        self.apply_btn.config(state=tk.DISABLED, text="Отправка...")
+        self.parent.update_idletasks()
+
+        try:
+            total = self.motor.configure_scan(n1, n2)
+            messagebox.showinfo("Инфо", f"Настроено сканирование: {n1}×{n2} = {total} точек")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка настройки: {e}")
+        finally:
+            self.apply_btn.config(state=tk.NORMAL, text="Применить")
+
+    def home_motors(self):
+        """Домашняя позиция"""
+        self.motor.home()
+
+    def stop_motors(self):
+        """Экстренная остановка"""
+        self.motor.emergency_stop()
