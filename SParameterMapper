@@ -1,0 +1,256 @@
+class SParameterMapper:
+    """Класс для работы с VNA"""
+
+    def __init__(self, vna_index=0, logging_level='info'):
+        self.vna = None
+        self.vna_index = vna_index
+        self.logging_level = logging_level
+        self.frequencies = None
+        self.s12_data_h = []
+        self.s12_data_v = []
+        self.positions = []
+        self.start_freq = None
+        self.stop_freq = None
+        self.num_points = None
+        self.freq_idx = 0
+
+    def connect_vna(self):
+        """Подключение к VNA"""
+        try:
+            self.vna = pynanovna.VNA(
+                vna_index=self.vna_index,
+                logging_level=self.logging_level
+            )
+            if self.vna.is_connected():
+                info = self.vna.info()
+                print(f"VNA подключен успешно: {info}")
+                return True
+            return False
+        except Exception as e:
+            print(f"Ошибка подключения: {e}")
+            return False
+
+    def set_frequency_range(self, start_freq_mhz, stop_freq_mhz, num_points=101):
+        """Установка диапазона частот"""
+        self.start_freq = start_freq_mhz * 1e6
+        self.stop_freq = stop_freq_mhz * 1e6
+        self.num_points = num_points
+        self.frequencies = np.linspace(self.start_freq, self.stop_freq, num_points)
+
+        if self.vna and self.vna.is_connected():
+            try:
+                self.vna.set_sweep(start=int(self.start_freq), stop=int(self.stop_freq), points=num_points)
+                time.sleep(0.5)
+            except Exception as e:
+                print(f"Ошибка установки sweep: {e}")
+        return self.frequencies
+
+    def calibrate_step(self, step):
+        """Выполнение одного шага калибровки"""
+        if not self.vna or not self.vna.is_connected():
+            raise Exception("VNA не подключен")
+        self.vna.calibration_step(step)
+
+    def finalize_calibration(self):
+        """Завершение калибровки"""
+        if not self.vna or not self.vna.is_connected():
+            raise Exception("VNA не подключен")
+        self.vna.calibrate()
+
+    def save_calibration(self, filename="calibration.json"):
+        """Сохранение калибровки"""
+        self.vna.save_calibration(filename)
+
+    def load_calibration(self, filename="calibration.json"):
+        """Загрузка калибровки"""
+        self.vna.load_calibration(filename)
+
+    def measure_single_sweep(self):
+        """Выполнение одного измерения"""
+        try:
+            result = self.vna.sweep()
+            if result is None or len(result) != 3:
+                return None, None
+
+            s11_raw, s21_raw, frequencies = result
+            if s21_raw is None:
+                return None, None
+
+            s12_data = self._convert_s_parameter_data(s21_raw)
+
+            if self.frequencies is None and frequencies is not None:
+                self.frequencies = np.array(frequencies)
+                self.num_points = len(frequencies)
+
+            return s12_data, frequencies
+
+        except Exception as e:
+            print(f"Ошибка измерения: {e}")
+            return None, None
+
+    def _convert_s_parameter_data(self, data):
+        """Преобразование данных S-параметров"""
+        if data is None:
+            return {'magnitude': np.zeros(self.num_points if self.num_points else 101),
+                    'phase': np.zeros(self.num_points if self.num_points else 101)}
+
+        if isinstance(data, dict) and 'magnitude' in data and 'phase' in data:
+            return {
+                'magnitude': np.array(data['magnitude']),
+                'phase': np.array(data['phase'])
+            }
+
+        elif isinstance(data, (list, tuple, np.ndarray)) and len(data) > 0:
+            if isinstance(data[0], complex):
+                return {
+                    'magnitude': np.abs(data),
+                    'phase': np.angle(data, deg=True)
+                }
+            else:
+                return {
+                    'magnitude': np.array(data),
+                    'phase': np.zeros_like(data)
+                }
+        else:
+            return {
+                'magnitude': np.zeros(self.num_points if self.num_points else 101),
+                'phase': np.zeros(self.num_points if self.num_points else 101)
+            }
+
+    def create_amplitude_map(self, data, freq_idx, x_coords_mm, y_coords_mm):
+        """Создание карты амплитуд"""
+        if len(self.positions) < 4:
+            return None
+
+        try:
+            x_coords = np.array(x_coords_mm) / 1000.0
+            y_coords = np.array(y_coords_mm) / 1000.0
+
+            s12_amp = np.array([d['magnitude'][freq_idx] for d in data])
+            with np.errstate(divide='ignore'):
+                s12_amp_db = 20 * np.log10(np.maximum(np.abs(s12_amp), 1e-6))
+
+            unique_x = np.unique(x_coords)
+            unique_y = np.unique(y_coords)
+
+            if len(unique_x) < 2 or len(unique_y) < 2:
+                if len(x_coords) > 1:
+                    step = np.mean(np.diff(np.sort(x_coords))) / 2
+                else:
+                    step = 0.01
+
+                if len(unique_x) == 1:
+                    unique_x = [unique_x[0] - step, unique_x[0], unique_x[0] + step]
+                if len(unique_y) == 1:
+                    unique_y = [unique_y[0] - step, unique_y[0], unique_y[0] + step]
+
+            max_points = 100
+            if len(unique_x) > max_points:
+                step = len(unique_x) // max_points
+                unique_x = unique_x[::step]
+            if len(unique_y) > max_points:
+                step = len(unique_y) // max_points
+                unique_y = unique_y[::step]
+
+            X_grid, Y_grid = np.meshgrid(unique_x, unique_y)
+
+            try:
+                S12_map = griddata((x_coords, y_coords), s12_amp_db, (X_grid, Y_grid), method='linear')
+                S12_map = np.nan_to_num(S12_map, nan=np.min(s12_amp_db) if len(s12_amp_db) > 0 else -100)
+            except:
+                S12_map = griddata((x_coords, y_coords), s12_amp_db, (X_grid, Y_grid), method='nearest')
+                S12_map = np.nan_to_num(S12_map, nan=np.min(s12_amp_db) if len(s12_amp_db) > 0 else -100)
+
+            freq_value = self.frequencies[freq_idx] / 1e6 if self.frequencies is not None else 200
+
+            return {
+                'X': X_grid * 1000,
+                'Y': Y_grid * 1000,
+                'S12': S12_map,
+                'freq': freq_value,
+                'points': len(self.positions)
+            }
+        except Exception as e:
+            print(f"Ошибка создания карты амплитуд: {e}")
+            return None
+
+    def create_phase_map(self, data, freq_idx, x_coords_mm, y_coords_mm):
+        """Создание карты фаз"""
+        if len(self.positions) < 4:
+            return None
+
+        try:
+            x_coords = np.array(x_coords_mm) / 1000.0
+            y_coords = np.array(y_coords_mm) / 1000.0
+
+            s12_phase = np.array([d['phase'][freq_idx] for d in data])
+
+            unique_x = np.unique(x_coords)
+            unique_y = np.unique(y_coords)
+
+            if len(unique_x) < 2 or len(unique_y) < 2:
+                if len(x_coords) > 1:
+                    step = np.mean(np.diff(np.sort(x_coords))) / 2
+                else:
+                    step = 0.01
+
+                if len(unique_x) == 1:
+                    unique_x = [unique_x[0] - step, unique_x[0], unique_x[0] + step]
+                if len(unique_y) == 1:
+                    unique_y = [unique_y[0] - step, unique_y[0], unique_y[0] + step]
+
+            max_points = 100
+            if len(unique_x) > max_points:
+                step = len(unique_x) // max_points
+                unique_x = unique_x[::step]
+            if len(unique_y) > max_points:
+                step = len(unique_y) // max_points
+                unique_y = unique_y[::step]
+
+            X_grid, Y_grid = np.meshgrid(unique_x, unique_y)
+
+            try:
+                S12_map = griddata((x_coords, y_coords), s12_phase, (X_grid, Y_grid), method='linear')
+                S12_map = np.nan_to_num(S12_map, nan=0)
+            except:
+                S12_map = griddata((x_coords, y_coords), s12_phase, (X_grid, Y_grid), method='nearest')
+                S12_map = np.nan_to_num(S12_map, nan=0)
+
+            freq_value = self.frequencies[freq_idx] / 1e6 if self.frequencies is not None else 200
+
+            return {
+                'X': X_grid * 1000,
+                'Y': Y_grid * 1000,
+                'S12': S12_map,
+                'freq': freq_value,
+                'points': len(self.positions)
+            }
+        except Exception as e:
+            print(f"Ошибка создания карты фаз: {e}")
+            return None
+
+    def save_data(self, filename=None):
+        """Сохранение данных в файл"""
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"s12_data_{timestamp}.npz"
+
+        positions_array = np.array(self.positions)
+        s12_magnitudes_h = np.array([data['magnitude'] for data in self.s12_data_h])
+        s12_phases_h = np.array([data['phase'] for data in self.s12_data_h])
+        s12_magnitudes_v = np.array([data['magnitude'] for data in self.s12_data_v])
+        s12_phases_v = np.array([data['phase'] for data in self.s12_data_v])
+
+        np.savez(filename,
+                 positions=positions_array,
+                 frequencies=self.frequencies,
+                 s12_magnitudes_h=s12_magnitudes_h,
+                 s12_phases_h=s12_phases_h,
+                 s12_magnitudes_v=s12_magnitudes_v,
+                 s12_phases_v=s12_phases_v,
+                 freq_idx=self.freq_idx,
+                 start_freq=self.start_freq,
+                 stop_freq=self.stop_freq,
+                 num_points=self.num_points)
+
+        return filename
