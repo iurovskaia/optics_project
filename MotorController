@@ -1,0 +1,133 @@
+class MotorController:
+    """Класс для управления моторами через ESP32 (режим змейка)"""
+
+    def __init__(self):
+        self.serial_conn = None
+        self.is_connected = False
+        self.measurement_count = 0
+        self.total_measurements = 0
+        self.stop_flag = False
+
+    def find_port(self):
+        """Автоматическое определение порта ESP32"""
+        ports = serial.tools.list_ports.comports()
+        for port in ports:
+            if any(x in port.description for x in ["USB", "Espressif", "CP210", "CH340", "CH9102"]):
+                return port.device
+        return None
+
+    def connect(self, port=None):
+        """Подключение к ESP32"""
+        port = 'COM7'
+
+        try:
+            self.serial_conn = serial.Serial(port, 115200, timeout=1)
+            time.sleep(2)
+
+            self.serial_conn.reset_input_buffer()
+            self.serial_conn.reset_output_buffer()
+
+            self.is_connected = True
+            print(f"✓ Моторы подключены к {port}")
+            return True
+
+        except Exception as e:
+            print(f"Ошибка подключения моторов: {e}")
+            return False
+
+    def disconnect(self):
+        """Отключение от ESP32"""
+        if self.serial_conn:
+            self.send_command('s')
+            time.sleep(0.5)
+            self.serial_conn.close()
+            self.is_connected = False
+            print("Моторы отключены")
+
+    def send_command(self, cmd, wait_response=True, timeout=30):
+        """Отправка команды на ESP32 и ожидание ответа"""
+        if not self.serial_conn or not self.is_connected:
+            print("Моторы не подключены")
+            return None
+
+        try:
+            # Очищаем буфер перед отправкой
+            self.serial_conn.reset_input_buffer()
+
+            # Отправляем команду
+            self.serial_conn.write(f"{cmd}\n".encode())
+            self.serial_conn.flush()
+
+            if not wait_response:
+                return None
+
+            # Ждем ответа
+            start_time = time.time()
+            responses = []
+
+            while time.time() - start_time < timeout:
+                if self.serial_conn.in_waiting:
+                    line = self.serial_conn.readline().decode().strip()
+                    if line:
+                        responses.append(line)
+                        print(f"  ESP32: {line}")
+
+                        # Для команд N1 и N2 ждем подтверждения
+                        if cmd.startswith('N') and "Error" not in line:
+                            # Если получили ответ без ошибки, возвращаем
+                            return responses
+
+                        if "COMPLETED" in line or "STOPPED" in line:
+                            return responses
+                time.sleep(0.05)
+
+            if not responses:
+                print(f"Нет ответа на команду {cmd}")
+
+            return responses if responses else None
+
+        except Exception as e:
+            print(f"Ошибка отправки команды: {e}")
+            return None
+
+    def configure_scan(self, n1, n2):
+        """Настройка параметров сканирования"""
+        print(f"Настройка сканирования: N1={n1}, N2={n2}")
+
+        # Отправляем N1 и ждем подтверждения
+        response1 = self.send_command(f"N1{n1}", timeout=5)
+        time.sleep(0.5)  # Пауза между командами
+
+        # Отправляем N2 и ждем подтверждения
+        response2 = self.send_command(f"N2{n2}", timeout=5)
+        time.sleep(0.5)
+
+        # Проверяем, что обе команды успешно выполнены
+        if response1 and response2:
+            print(f"Параметры сканирования установлены: N1={n1}, N2={n2}")
+        else:
+            print("Ошибка при установке параметров сканирования")
+
+        self.total_measurements = n1 * n2
+        print(f"Всего точек измерения: {self.total_measurements}")
+
+        return self.total_measurements
+
+    def start_meander(self):
+        """Запуск движения по змейке"""
+        print("Запуск движения по змейке...")
+        self.measurement_count = 0
+        self.send_command("g", timeout=600)
+
+    def emergency_stop(self):
+        """Экстренная остановка"""
+        self.stop_flag = True
+        self.send_command("s")
+
+    def home(self):
+        """Домашняя позиция"""
+        self.send_command("h")
+
+    def get_status(self):
+        """Получение статуса"""
+        self.send_command("i")
