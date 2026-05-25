@@ -1,0 +1,114 @@
+class OptimizedPlotter:
+    """Оптимизированный класс для быстрой отрисовки графиков"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.fig = None
+        self.canvas = None
+        self.toolbar = None
+        self.initialized = False
+        self.current_im = None
+        self.current_colorbar = None
+        self.fixed_extent = None
+        self.full_X_grid = None
+        self.full_Y_grid = None
+        self.full_Z = None
+        self.x_points = None
+        self.y_points = None
+
+    def create_figure(self):
+        """Создание фигуры один раз"""
+        self.fig = plt.figure(figsize=(10, 8), dpi=100, facecolor='#1e1e2e')
+        self.canvas = FigureCanvasTkAgg(self.fig, self.parent)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.parent)
+        self.toolbar.update()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas.draw()
+        self.initialized = True
+        return self.fig, self.canvas, self.toolbar
+
+    def initialize_grid(self, x_min, x_max, y_min, y_max, step_x, step_y):
+        """Инициализация сетки для всей области сканирования"""
+        self.x_points = np.arange(x_min, x_max + step_x / 2, step_x)
+        self.y_points = np.arange(y_min, y_max + step_y / 2, step_y)
+
+        self.full_X_grid, self.full_Y_grid = np.meshgrid(self.x_points, self.y_points)
+        self.full_Z = np.full_like(self.full_X_grid, np.nan)
+
+        x_min_mm = x_min * 1000
+        x_max_mm = x_max * 1000
+        y_min_mm = y_min * 1000
+        y_max_mm = y_max * 1000
+        self.fixed_extent = [x_min_mm, x_max_mm, y_min_mm, y_max_mm]
+
+        return self.full_X_grid * 1000, self.full_Y_grid * 1000
+
+    def update_point(self, x, y, value, ax, title, cmap, cbar_label):
+        """Обновление одной точки на карте"""
+        if not self.initialized or self.full_X_grid is None:
+            return
+
+        def do_update():
+            try:
+                xi = np.argmin(np.abs(self.x_points - x))
+                yi = np.argmin(np.abs(self.y_points - y))
+
+                self.full_Z[yi, xi] = value
+
+                if self.current_im is None:
+                    self.current_im = ax.imshow(self.full_Z, origin='lower',
+                                                extent=self.fixed_extent,
+                                                cmap=cmap, aspect='auto',
+                                                interpolation='bilinear')
+                    self.current_im.cmap.set_bad('lightgray', 1.0)
+                    ax.set_title(title, fontsize=12, fontweight='bold', color='white')
+                    ax.set_xlabel('X (мм)', fontsize=11, color='white')
+                    ax.set_ylabel('Y (мм)', fontsize=11, color='white')
+                    ax.tick_params(colors='white')
+                    ax.set_xlim(self.fixed_extent[0], self.fixed_extent[1])
+                    ax.set_ylim(self.fixed_extent[2], self.fixed_extent[3])
+                    ax.set_facecolor('#1a1a2e')
+
+                    if self.current_colorbar is None:
+                        self.current_colorbar = plt.colorbar(self.current_im, ax=ax,
+                                                             label=cbar_label, shrink=0.8)
+                        self.current_colorbar.ax.yaxis.label.set_color('white')
+                        self.current_colorbar.ax.tick_params(colors='white')
+                else:
+                    self.current_im.set_data(self.full_Z)
+                    valid_data = self.full_Z[~np.isnan(self.full_Z)]
+                    if len(valid_data) > 0:
+                        self.current_im.set_clim(np.min(valid_data), np.max(valid_data))
+
+                    if self.current_colorbar is not None:
+                        self.current_colorbar.update_normal(self.current_im)
+
+                ax.set_title(f'{title}\nТочек: {np.sum(~np.isnan(self.full_Z))}',
+                             fontsize=12, fontweight='bold', color='white')
+                self.canvas.draw_idle()
+
+            except Exception as e:
+                print(f"Ошибка обновления точки: {e}")
+                traceback.print_exc()
+
+        try:
+            root = self.parent.winfo_toplevel()
+            root.after(0, do_update)
+        except:
+            do_update()
+
+    def reset(self):
+        """Сброс для новой серии измерений"""
+        if self.current_colorbar is not None:
+            try:
+                self.current_colorbar.remove()
+            except:
+                pass
+        self.current_im = None
+        self.current_colorbar = None
+        self.full_X_grid = None
+        self.full_Y_grid = None
+        self.full_Z = None
+        self.fixed_extent = None
+        self.x_points = None
+        self.y_points = None
