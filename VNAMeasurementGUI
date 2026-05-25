@@ -1,0 +1,683 @@
+class VNAMeasurementGUI:
+    """Графический интерфейс для работы с VNA и моторами"""
+
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("VNA Анализатор - Синхронизированное сканирование")
+        self.root.geometry("1700x950")
+        self.root.configure(bg='#1a1a2e')
+
+        self.motor = MotorController()
+        self.mapper = SParameterMapper(logging_level='info')
+
+        self.is_connected = False
+        self.is_measuring = False
+        self.measurement_thread = None
+
+        self.start_freq = tk.DoubleVar(value=100)
+        self.stop_freq = tk.DoubleVar(value=300)
+        self.num_points = tk.IntVar(value=101)
+        self.analysis_freq = tk.DoubleVar(value=200)
+
+        self.progress_value = tk.IntVar(value=0)
+        self.status_text = tk.StringVar(value="🟢 Готов к работе")
+
+        self.plotter_h_amp = None
+        self.plotter_v_amp = None
+        self.plotter_h_phase = None
+        self.plotter_v_phase = None
+        self.motor_panel = None
+        self.info_panel = None
+
+        self.setup_ui()
+        self.setup_plots()
+
+    def setup_ui(self):
+        """Настройка пользовательского интерфейса"""
+        main_frame = tk.Frame(self.root, bg='#1a1a2e')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        left_panel = tk.Frame(main_frame, width=400, bg='#1a1a2e')
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        left_panel.pack_propagate(False)
+
+        center_panel = tk.Frame(main_frame, bg='#1a1a2e')
+        center_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        right_panel = tk.Frame(main_frame, width=380, bg='#1a1a2e')
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
+        right_panel.pack_propagate(False)
+
+        self.notebook = ttk.Notebook(center_panel)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        self.tab_h_amp = tk.Frame(self.notebook, bg='#1a1a2e')
+        self.tab_v_amp = tk.Frame(self.notebook, bg='#1a1a2e')
+        self.tab_h_phase = tk.Frame(self.notebook, bg='#1a1a2e')
+        self.tab_v_phase = tk.Frame(self.notebook, bg='#1a1a2e')
+
+        self.notebook.add(self.tab_h_amp, text="🌊 H-Амплитуда")
+        self.notebook.add(self.tab_v_amp, text="🌊 V-Амплитуда")
+        self.notebook.add(self.tab_h_phase, text="🌀 H-Фаза")
+        self.notebook.add(self.tab_v_phase, text="🌀 V-Фаза")
+
+        self.setup_vna_panel(left_panel)
+        self.motor_panel = MotorControlPanel(right_panel, self.motor)
+        self.info_panel = InfoPanel(right_panel)
+
+    def setup_plots(self):
+        """Однократное создание всех графиков"""
+        self.plotter_h_amp = OptimizedPlotter(self.tab_h_amp)
+        self.fig_h_amp, self.canvas_h_amp, self.toolbar_h_amp = self.plotter_h_amp.create_figure()
+        self.ax_h_amp = self.fig_h_amp.add_subplot(111)
+
+        self.plotter_v_amp = OptimizedPlotter(self.tab_v_amp)
+        self.fig_v_amp, self.canvas_v_amp, self.toolbar_v_amp = self.plotter_v_amp.create_figure()
+        self.ax_v_amp = self.fig_v_amp.add_subplot(111)
+
+        self.plotter_h_phase = OptimizedPlotter(self.tab_h_phase)
+        self.fig_h_phase, self.canvas_h_phase, self.toolbar_h_phase = self.plotter_h_phase.create_figure()
+        self.ax_h_phase = self.fig_h_phase.add_subplot(111)
+
+        self.plotter_v_phase = OptimizedPlotter(self.tab_v_phase)
+        self.fig_v_phase, self.canvas_v_phase, self.toolbar_v_phase = self.plotter_v_phase.create_figure()
+        self.ax_v_phase = self.fig_v_phase.add_subplot(111)
+
+    def setup_vna_panel(self, parent):
+        """Настройка панели управления VNA"""
+        inner_frame = tk.Frame(parent, bg='#1a1a2e')
+        inner_frame.pack(fill=tk.BOTH, expand=True)
+
+        row = 0
+
+        title = tk.Label(inner_frame, text="🎛 УПРАВЛЕНИЕ VNA",
+                         font=('Arial', 14, 'bold'), bg='#1a1a2e', fg='#00d4ff')
+        title.grid(row=row, column=0, columnspan=2, pady=15, sticky='ew')
+        row += 1
+
+        conn_frame = tk.LabelFrame(inner_frame, text="Подключение к VNA",
+                                   font=('Arial', 11, 'bold'), bg='#2a2a4e', fg='white')
+        conn_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=5, pady=8)
+
+        tk.Button(conn_frame, text="🔌 Подключить VNA", command=self.connect_vna,
+                  bg='#44aa44', fg='white', font=('Arial', 10), padx=10, pady=5).pack(pady=5)
+        self.conn_status = tk.Label(conn_frame, text="Статус: Не подключен",
+                                    bg='#2a2a4e', fg='#ff8888', font=('Arial', 10))
+        self.conn_status.pack(pady=5)
+        row += 1
+
+        freq_frame = tk.LabelFrame(inner_frame, text="Диапазон частот",
+                                   font=('Arial', 11, 'bold'), bg='#2a2a4e', fg='white')
+        freq_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=5, pady=8)
+
+        tk.Label(freq_frame, text="Начальная (МГц):", bg='#2a2a4e', fg='white').grid(row=0, column=0, padx=5, pady=3)
+        tk.Entry(freq_frame, textvariable=self.start_freq, width=12).grid(row=0, column=1, padx=5, pady=3)
+
+        tk.Label(freq_frame, text="Конечная (МГц):", bg='#2a2a4e', fg='white').grid(row=1, column=0, padx=5, pady=3)
+        tk.Entry(freq_frame, textvariable=self.stop_freq, width=12).grid(row=1, column=1, padx=5, pady=3)
+
+        tk.Label(freq_frame, text="Точек:", bg='#2a2a4e', fg='white').grid(row=2, column=0, padx=5, pady=3)
+        tk.Entry(freq_frame, textvariable=self.num_points, width=12).grid(row=2, column=1, padx=5, pady=3)
+
+        tk.Button(freq_frame, text="Применить", command=self.apply_frequency,
+                  bg='#44aaff', fg='white', font=('Arial', 10)).grid(row=3, column=0, columnspan=2, pady=5, sticky='ew',
+                                                                     padx=5)
+        row += 1
+
+        cal_frame = tk.LabelFrame(inner_frame, text="Калибровка",
+                                  font=('Arial', 11, 'bold'), bg='#2a2a4e', fg='white')
+        cal_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=5, pady=8)
+
+        tk.Button(cal_frame, text="Начать калибровку", command=self.start_calibration,
+                  bg='#ffaa44', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=3)
+        tk.Button(cal_frame, text="Сохранить калибровку", command=self.save_calibration,
+                  bg='#44aaff', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=3)
+        tk.Button(cal_frame, text="Загрузить калибровку", command=self.load_calibration,
+                  bg='#44aaff', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=3)
+        row += 1
+
+        measure_frame = tk.LabelFrame(inner_frame, text="Синхронизированные измерения",
+                                      font=('Arial', 11, 'bold'), bg='#2a2a4e', fg='white')
+        measure_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=5, pady=8)
+
+        self.start_btn = tk.Button(measure_frame, text="▶ Начать сканирование", command=self.start_measurement,
+                                   bg='#44aa44', fg='white', font=('Arial', 11, 'bold'), pady=8)
+        self.start_btn.pack(fill=tk.X, padx=10, pady=5)
+
+        self.stop_btn = tk.Button(measure_frame, text="⏹ Остановить", command=self.stop_measurement,
+                                  bg='#ff4444', fg='white', font=('Arial', 11, 'bold'), pady=8, state=tk.DISABLED)
+        self.stop_btn.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Button(measure_frame, text="🎮 Демо режим", command=self.start_demo,
+                  bg='#aa44ff', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=5)
+
+        self.progress = ttk.Progressbar(measure_frame, variable=self.progress_value, mode='determinate')
+        self.progress.pack(fill=tk.X, padx=10, pady=8)
+
+        self.status_label = tk.Label(measure_frame, textvariable=self.status_text,
+                                     bg='#2a2a4e', fg='#88ff88', font=('Arial', 10))
+        self.status_label.pack(pady=5)
+        row += 1
+
+        analysis_frame = tk.LabelFrame(inner_frame, text="Анализ",
+                                       font=('Arial', 11, 'bold'), bg='#2a2a4e', fg='white')
+        analysis_frame.grid(row=row, column=0, columnspan=2, sticky='ew', padx=5, pady=8)
+
+        tk.Label(analysis_frame, text="Частота (МГц):", bg='#2a2a4e', fg='white').pack(pady=5)
+        tk.Entry(analysis_frame, textvariable=self.analysis_freq, width=12).pack(pady=5)
+
+        tk.Button(analysis_frame, text="Обновить графики", command=self.update_plots,
+                  bg='#44aaff', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=5)
+        tk.Button(analysis_frame, text="Сохранить данные", command=self.save_data,
+                  bg='#44aa44', fg='white', font=('Arial', 10), pady=5).pack(fill=tk.X, padx=10, pady=5)
+
+        inner_frame.columnconfigure(0, weight=1)
+        inner_frame.columnconfigure(1, weight=1)
+
+    def connect_vna(self):
+        """Подключение к VNA"""
+
+        def connect_thread():
+            self.root.after(0, lambda: self.status_text.set("🟡 Подключение к VNA..."))
+            success = self.mapper.connect_vna()
+            if success:
+                self.is_connected = True
+                self.root.after(0, lambda: self.conn_status.config(text="Статус: ✅ Подключен", fg="#88ff88"))
+                self.root.after(0, lambda: self.status_text.set("🟢 VNA подключен успешно"))
+                self.root.after(0, lambda: messagebox.showinfo("Успех", "VNA успешно подключен!"))
+            else:
+                self.root.after(0, lambda: self.conn_status.config(text="Статус: ❌ Ошибка", fg="#ff8888"))
+                self.root.after(0, lambda: self.status_text.set("🔴 Ошибка подключения VNA"))
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", "Не удалось подключиться к VNA"))
+
+        threading.Thread(target=connect_thread, daemon=True).start()
+
+    def apply_frequency(self):
+        """Применение диапазона частот"""
+        if self.mapper:
+            try:
+                self.mapper.set_frequency_range(
+                    self.start_freq.get(),
+                    self.stop_freq.get(),
+                    self.num_points.get()
+                )
+                self.status_text.set(f"✅ Диапазон: {self.start_freq.get()}-{self.stop_freq.get()} МГц")
+            except Exception as e:
+                messagebox.showerror("Ошибка", str(e))
+
+    def start_calibration(self):
+        """Запуск калибровки"""
+        if not self.is_connected:
+            messagebox.showwarning("Предупреждение", "Сначала подключите VNA")
+            return
+
+        self.apply_frequency()
+
+        cal_dialog = tk.Toplevel(self.root)
+        cal_dialog.title("Калибровка VNA")
+        cal_dialog.geometry("450x400")
+        cal_dialog.configure(bg='#1a1a2e')
+
+        tk.Label(cal_dialog, text="КАЛИБРОВКА VNA", font=('Arial', 16, 'bold'),
+                 bg='#1a1a2e', fg='#00d4ff').pack(pady=15)
+
+        steps = ['open', 'short', 'load', 'through']
+        step_names = ['OPEN', 'SHORT', 'LOAD', 'THROUGH']
+        current_step = [0]
+
+        step_label = tk.Label(cal_dialog, text=f"Шаг 1/4: {step_names[0]}",
+                              font=('Arial', 12), bg='#1a1a2e', fg='white')
+        step_label.pack(pady=10)
+
+        progress = ttk.Progressbar(cal_dialog, mode='determinate', maximum=4, length=350)
+        progress.pack(pady=10)
+
+        status_label = tk.Label(cal_dialog, text="Подключите OPEN к порту 1",
+                                font=('Arial', 11), bg='#1a1a2e', fg='#88aaff')
+        status_label.pack(pady=10)
+
+        def next_step():
+            try:
+                step = steps[current_step[0]]
+                self.mapper.calibrate_step(step)
+                current_step[0] += 1
+                progress['value'] = current_step[0]
+
+                if current_step[0] < 4:
+                    step_label.config(text=f"Шаг {current_step[0] + 1}/4: {step_names[current_step[0]]}")
+                    status_label.config(text=f"Подключите {step_names[current_step[0]]} к порту 1")
+                else:
+                    status_label.config(text="Расчет калибровки...")
+                    cal_dialog.update()
+                    self.mapper.finalize_calibration()
+                    status_label.config(text="✅ Калибровка завершена!", fg="#88ff88")
+                    messagebox.showinfo("Успех", "Калибровка успешно завершена!")
+                    cal_dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Ошибка калибровки: {e}")
+
+        tk.Button(cal_dialog, text="ДАЛЕЕ", command=next_step,
+                  bg='#44aa44', fg='white', font=('Arial', 11), padx=20, pady=5).pack(pady=10)
+        tk.Button(cal_dialog, text="ОТМЕНА", command=cal_dialog.destroy,
+                  bg='#ff4444', fg='white', font=('Arial', 11), padx=20, pady=5).pack(pady=5)
+
+    def save_calibration(self):
+        """Сохранение калибровки"""
+        if not self.is_connected:
+            messagebox.showwarning("Предупреждение", "Сначала подключите VNA")
+            return
+
+        filename = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if filename:
+            self.mapper.save_calibration(filename)
+            self.status_text.set(f"✅ Калибровка сохранена")
+
+    def load_calibration(self):
+        """Загрузка калибровки"""
+        if not self.is_connected:
+            messagebox.showwarning("Предупреждение", "Сначала подключите VNA")
+            return
+
+        filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if filename:
+            self.mapper.load_calibration(filename)
+            self.status_text.set(f"✅ Калибровка загружена")
+
+    def stop_measurement(self):
+        """Остановка измерения"""
+        if self.is_measuring:
+            self.motor.emergency_stop()
+            self.status_text.set("🟠 Остановка измерения...")
+            self.stop_btn.config(state=tk.DISABLED)
+
+    def start_measurement(self):
+        """Запуск синхронизированных измерений"""
+        if not self.is_connected:
+            messagebox.showwarning("Предупреждение", "Сначала подключите VNA")
+            return
+
+        if self.is_measuring:
+            messagebox.showwarning("Предупреждение", "Измерение уже выполняется")
+            return
+
+        if not self.motor.is_connected:
+            messagebox.showwarning("Предупреждение", "Сначала подключите моторы")
+            return
+
+        n1 = self.motor_panel.n1_var.get()
+        n2 = self.motor_panel.n2_var.get()
+
+        X1_mm = 210.0
+        X2_mm = 210.0
+
+        step_x_mm = X1_mm / (n1 - 1)
+        step_y_mm = X2_mm / (n2 - 1)
+
+        step_x_m = step_x_mm / 1000.0
+        step_y_m = step_y_mm / 1000.0
+
+        self.plotter_h_amp.reset()
+        self.plotter_v_amp.reset()
+        self.plotter_h_phase.reset()
+        self.plotter_v_phase.reset()
+
+        self.ax_h_amp.clear()
+        self.ax_v_amp.clear()
+        self.ax_h_phase.clear()
+        self.ax_v_phase.clear()
+
+        self.plotter_h_amp.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_v_amp.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_h_phase.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_v_phase.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+
+        self.mapper.positions = []
+        self.mapper.s12_data_h = []
+        self.mapper.s12_data_v = []
+
+        def measure_thread():
+            self.is_measuring = True
+            self.root.after(0, lambda: self.start_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.stop_btn.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.progress.configure(maximum=n1 * n2))
+
+            try:
+                self.root.after(0, lambda: self.status_text.set("🟢 Настройка параметров сканирования..."))
+                self.motor.configure_scan(n1, n2)
+                time.sleep(0.5)
+
+                self.root.after(0, lambda: self.status_text.set("🟢 Запуск движения по змейке..."))
+
+                self.motor.send_command("g", wait_response=False)
+
+                measurement_index = 0
+                current_x = 0
+                current_y = 0
+
+                while self.is_measuring:
+                    if self.motor.serial_conn and self.motor.serial_conn.in_waiting:
+                        line = self.motor.serial_conn.readline().decode().strip()
+                        if line:
+                            print(f"ESP32: {line}")
+
+                            if "M2 reached point" in line:
+                                match = re.search(r'point (\d+)', line)
+                                if match:
+                                    current_y = int(match.group(1))
+
+                                    self.root.after(0, lambda idx=measurement_index, x=current_x, y=current_y:
+                                    self.status_text.set(f"📡 Измерение {idx + 1}/{n1 * n2}: X={x}, Y={y}"))
+
+                                    s12, _ = self.mapper.measure_single_sweep()
+
+                                    if s12 is not None:
+                                        x_mm = current_x * step_x_mm
+                                        y_mm = current_y * step_y_mm
+                                        x_m = x_mm / 1000.0
+                                        y_m = y_mm / 1000.0
+
+                                        self.mapper.positions.append((x_m, y_m, 0))
+                                        self.mapper.s12_data_h.append(s12)
+                                        self.mapper.s12_data_v.append({
+                                            'magnitude': s12['magnitude'] * 0.8,
+                                            'phase': s12['phase'] + 90
+                                        })
+
+                                        freq_mhz = self.analysis_freq.get()
+                                        freq_idx = np.argmin(np.abs(self.mapper.frequencies - freq_mhz * 1e6))
+
+                                        mag_h = s12['magnitude'][freq_idx]
+                                        mag_h_db = 20 * np.log10(np.maximum(mag_h, 1e-6))
+                                        phase_h = s12['phase'][freq_idx]
+                                        mag_v = s12['magnitude'][freq_idx] * 0.8
+                                        mag_v_db = 20 * np.log10(np.maximum(mag_v, 1e-6))
+                                        phase_v = s12['phase'][freq_idx] + 90
+
+                                        self.plotter_h_amp.update_point(x_m, y_m, mag_h_db, self.ax_h_amp,
+                                                                        f'H-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                                        'jet', 'Амплитуда (dB)')
+
+                                        self.plotter_v_amp.update_point(x_m, y_m, mag_v_db, self.ax_v_amp,
+                                                                        f'V-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                                        'jet', 'Амплитуда (dB)')
+
+                                        self.plotter_h_phase.update_point(x_m, y_m, phase_h, self.ax_h_phase,
+                                                                          f'H-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                                          'twilight', 'Фаза (градусы)')
+
+                                        self.plotter_v_phase.update_point(x_m, y_m, phase_v, self.ax_v_phase,
+                                                                          f'V-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                                          'twilight', 'Фаза (градусы)')
+
+                                        temp_h = {'magnitude': np.array([mag_h]), 'phase': np.array([phase_h])}
+                                        temp_v = {'magnitude': np.array([mag_v]), 'phase': np.array([phase_v])}
+                                        self.info_panel.update_info((x_mm, y_mm, 0), temp_h, temp_v, freq_mhz,
+                                                                    len(self.mapper.positions))
+
+                                        measurement_index += 1
+                                        self.root.after(0, lambda val=measurement_index: self.progress_value.set(val))
+
+                            elif "M1 reached point" in line:
+                                match = re.search(r'point (\d+)', line)
+                                if match:
+                                    current_x = int(match.group(1))
+
+                            elif "COMPLETED" in line:
+                                self.root.after(0, lambda: self.status_text.set(
+                                    f"✅ Измерения завершены. Всего точек: {len(self.mapper.positions)}"))
+                                break
+
+                    time.sleep(0.01)
+
+                self.root.after(0, lambda: messagebox.showinfo("Успех", f"Измерено {len(self.mapper.positions)} точек"))
+
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", f"Ошибка измерений: {e}"))
+                self.root.after(0, lambda: self.status_text.set("🔴 Ошибка измерений"))
+                traceback.print_exc()
+            finally:
+                self.is_measuring = False
+                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+
+        self.measurement_thread = threading.Thread(target=measure_thread, daemon=True)
+        self.measurement_thread.start()
+
+    def start_demo(self):
+        """Запуск демонстрационного режима"""
+        if self.is_measuring:
+            messagebox.showwarning("Предупреждение", "Измерение уже выполняется")
+            return
+
+        n1 = self.motor_panel.n1_var.get()
+        n2 = self.motor_panel.n2_var.get()
+
+        X1_mm = 210.0
+        X2_mm = 210.0
+
+        step_x_mm = X1_mm / (n1 - 1)
+        step_y_mm = X2_mm / (n2 - 1)
+
+        step_x_m = step_x_mm / 1000.0
+        step_y_m = step_y_mm / 1000.0
+
+        self.plotter_h_amp.reset()
+        self.plotter_v_amp.reset()
+        self.plotter_h_phase.reset()
+        self.plotter_v_phase.reset()
+
+        self.ax_h_amp.clear()
+        self.ax_v_amp.clear()
+        self.ax_h_phase.clear()
+        self.ax_v_phase.clear()
+
+        self.plotter_h_amp.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_v_amp.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_h_phase.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+        self.plotter_v_phase.initialize_grid(0, X1_mm / 1000.0, 0, X2_mm / 1000.0, step_x_m, step_y_m)
+
+        self.mapper.positions = []
+        self.mapper.s12_data_h = []
+        self.mapper.s12_data_v = []
+
+        start_freq = self.start_freq.get() * 1e6
+        stop_freq = self.stop_freq.get() * 1e6
+        num_points = self.num_points.get()
+        self.mapper.frequencies = np.linspace(start_freq, stop_freq, num_points)
+        self.mapper.num_points = num_points
+
+        freq_mhz = self.analysis_freq.get()
+        freq_idx = np.argmin(np.abs(self.mapper.frequencies - freq_mhz * 1e6))
+
+        total_points = n1 * n2
+        self.progress.configure(maximum=total_points)
+
+        def demo_thread():
+            self.is_measuring = True
+            self.root.after(0, lambda: self.start_btn.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.stop_btn.config(state=tk.NORMAL))
+
+            try:
+                for i in range(n1):
+                    for j in range(n2):
+                        if not self.is_measuring:
+                            break
+
+                        idx = i * n2 + j
+                        self.root.after(0, lambda val=idx + 1: self.progress_value.set(val))
+                        self.root.after(0, lambda val=idx + 1, total=total_points:
+                        self.status_text.set(f"🎮 Генерация: {val}/{total_points}"))
+
+                        x_mm = i * step_x_mm
+                        y_mm = j if i % 2 == 0 else (n2 - 1 - j)
+                        y_mm = y_mm * step_y_mm
+
+                        x_m = x_mm / 1000.0
+                        y_m = y_mm / 1000.0
+
+                        r = np.sqrt(x_m ** 2 + y_m ** 2)
+                        s12_mag = np.zeros(num_points)
+                        s12_phase = np.zeros(num_points)
+
+                        for k, freq in enumerate(self.mapper.frequencies):
+                            f_norm = (freq - start_freq) / (stop_freq - start_freq)
+                            s12_mag[k] = 0.1 * np.exp(-r ** 2 / 0.02) * (0.8 + 0.2 * np.cos(2 * np.pi * f_norm))
+                            s12_phase[k] = -2 * np.pi * freq * r / 3e8 * 180 / np.pi
+
+                        self.mapper.positions.append((x_m, y_m, 0))
+                        self.mapper.s12_data_h.append({'magnitude': s12_mag, 'phase': s12_phase})
+                        self.mapper.s12_data_v.append({
+                            'magnitude': s12_mag * 0.7,
+                            'phase': s12_phase + 90
+                        })
+
+                        mag_h = s12_mag[freq_idx]
+                        mag_h_db = 20 * np.log10(np.maximum(mag_h, 1e-6))
+                        phase_h = s12_phase[freq_idx]
+                        mag_v = s12_mag[freq_idx] * 0.7
+                        mag_v_db = 20 * np.log10(np.maximum(mag_v, 1e-6))
+                        phase_v = s12_phase[freq_idx] + 90
+
+                        self.plotter_h_amp.update_point(x_m, y_m, mag_h_db, self.ax_h_amp,
+                                                        f'H-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                        'jet', 'Амплитуда (dB)')
+
+                        self.plotter_v_amp.update_point(x_m, y_m, mag_v_db, self.ax_v_amp,
+                                                        f'V-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                        'jet', 'Амплитуда (dB)')
+
+                        self.plotter_h_phase.update_point(x_m, y_m, phase_h, self.ax_h_phase,
+                                                          f'H-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                          'twilight', 'Фаза (градусы)')
+
+                        self.plotter_v_phase.update_point(x_m, y_m, phase_v, self.ax_v_phase,
+                                                          f'V-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                          'twilight', 'Фаза (градусы)')
+
+                        temp_h = {'magnitude': np.array([mag_h]), 'phase': np.array([phase_h])}
+                        temp_v = {'magnitude': np.array([mag_v]), 'phase': np.array([phase_v])}
+                        self.info_panel.update_info((x_mm, y_mm, 0), temp_h, temp_v, freq_mhz,
+                                                    len(self.mapper.positions))
+
+                        time.sleep(0.05)
+
+                self.root.after(0, lambda: self.status_text.set(f"✅ Сгенерировано {len(self.mapper.positions)} точек"))
+                self.root.after(0, lambda: messagebox.showinfo("Успех",
+                                                               f"Сгенерировано {len(self.mapper.positions)} точек"))
+
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", f"Ошибка генерации: {e}"))
+            finally:
+                self.is_measuring = False
+                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+
+        threading.Thread(target=demo_thread, daemon=True).start()
+
+    def update_plots(self):
+        """Обновление графиков"""
+        if len(self.mapper.positions) < 4:
+            messagebox.showwarning("Предупреждение",
+                                   f"Недостаточно данных. Измерено {len(self.mapper.positions)} точек. Требуется минимум 4.")
+            return
+
+        freq_mhz = self.analysis_freq.get()
+        freq_idx = np.argmin(np.abs(self.mapper.frequencies - freq_mhz * 1e6))
+
+        x_coords_mm = [p[0] * 1000 for p in self.mapper.positions]
+        y_coords_mm = [p[1] * 1000 for p in self.mapper.positions]
+
+        amp_h = self.mapper.create_amplitude_map(self.mapper.s12_data_h, freq_idx, x_coords_mm, y_coords_mm)
+        amp_v = self.mapper.create_amplitude_map(self.mapper.s12_data_v, freq_idx, x_coords_mm, y_coords_mm)
+        phase_h = self.mapper.create_phase_map(self.mapper.s12_data_h, freq_idx, x_coords_mm, y_coords_mm)
+        phase_v = self.mapper.create_phase_map(self.mapper.s12_data_v, freq_idx, x_coords_mm, y_coords_mm)
+
+        if amp_h and amp_v and phase_h and phase_v:
+            amp_h['freq'] = freq_mhz
+            amp_v['freq'] = freq_mhz
+            phase_h['freq'] = freq_mhz
+            phase_v['freq'] = freq_mhz
+
+            self.plotter_h_amp.update_amplitude_map(amp_h, self.ax_h_amp,
+                                                    f'H-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                    'jet', 'Амплитуда (dB)')
+
+            self.plotter_v_amp.update_amplitude_map(amp_v, self.ax_v_amp,
+                                                    f'V-поляризация - Амплитуда S12 (dB)\nЧастота: {freq_mhz:.1f} МГц',
+                                                    'jet', 'Амплитуда (dB)')
+
+            self.plotter_h_phase.update_phase_map(phase_h, self.ax_h_phase,
+                                                  f'H-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                  'twilight', 'Фаза (градусы)')
+
+            self.plotter_v_phase.update_phase_map(phase_v, self.ax_v_phase,
+                                                  f'V-поляризация - Фаза S12 (градусы)\nЧастота: {freq_mhz:.1f} МГц',
+                                                  'twilight', 'Фаза (градусы)')
+
+    def save_data(self):
+        """Сохранение данных"""
+        if not self.mapper.positions:
+            messagebox.showwarning("Предупреждение", "Нет данных для сохранения")
+            return
+
+        filename = filedialog.asksaveasfilename(defaultextension=".npz",
+                                                filetypes=[("NumPy files", "*.npz"),
+                                                           ("CSV files", "*.csv"),
+                                                           ("JSON files", "*.json")])
+        if filename:
+            if filename.endswith('.csv'):
+                self.save_to_csv(filename)
+            elif filename.endswith('.json'):
+                self.save_to_json(filename)
+            else:
+                self.mapper.save_data(filename)
+            self.status_text.set(f"✅ Данные сохранены")
+
+    def save_to_csv(self, filename):
+        """Сохранение в CSV"""
+        import csv
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['X (мм)', 'Y (мм)', 'Z (мм)',
+                             'S12_H_mag_dB', 'S12_H_phase_deg',
+                             'S12_V_mag_dB', 'S12_V_phase_deg'])
+            for i, pos in enumerate(self.mapper.positions):
+                freq_idx = self.mapper.freq_idx
+                mag_h = self.mapper.s12_data_h[i]['magnitude'][freq_idx]
+                mag_h_db = 20 * np.log10(np.maximum(mag_h, 1e-6))
+                phase_h = self.mapper.s12_data_h[i]['phase'][freq_idx]
+                mag_v = self.mapper.s12_data_v[i]['magnitude'][freq_idx]
+                mag_v_db = 20 * np.log10(np.maximum(mag_v, 1e-6))
+                phase_v = self.mapper.s12_data_v[i]['phase'][freq_idx]
+                writer.writerow([pos[0] * 1000, pos[1] * 1000, pos[2] * 1000,
+                                 mag_h_db, phase_h, mag_v_db, phase_v])
+
+    def save_to_json(self, filename):
+        """Сохранение в JSON"""
+        import json
+        data = {
+            'measurement_info': {
+                'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'start_freq_mhz': self.start_freq.get(),
+                'stop_freq_mhz': self.stop_freq.get(),
+                'num_points': self.num_points.get(),
+                'num_measurements': len(self.mapper.positions),
+                'scan_pattern': 'meander'
+            },
+            'frequencies_hz': self.mapper.frequencies.tolist(),
+            'measurements': []
+        }
+        for i, pos in enumerate(self.mapper.positions):
+            data['measurements'].append({
+                'position_mm': [pos[0] * 1000, pos[1] * 1000, pos[2] * 1000],
+                's12_h_magnitude': self.mapper.s12_data_h[i]['magnitude'].tolist(),
+                's12_h_phase': self.mapper.s12_data_h[i]['phase'].tolist(),
+                's12_v_magnitude': self.mapper.s12_data_v[i]['magnitude'].tolist(),
+                's12_v_phase': self.mapper.s12_data_v[i]['phase'].tolist()
+            })
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def run(self):
+        """Запуск приложения"""
+        self.root.mainloop()
