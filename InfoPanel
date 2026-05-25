@@ -1,0 +1,92 @@
+class InfoPanel:
+    """Панель информации о текущем измерении"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.frame = tk.Frame(parent, bg='#2a2a4e', relief=tk.RAISED, bd=2)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        """Настройка интерфейса панели"""
+        title = tk.Label(self.frame, text="📡 ИНФОРМАЦИЯ", font=('Arial', 13, 'bold'),
+                         bg='#2a2a4e', fg='#00d4ff')
+        title.pack(pady=10)
+
+        coord_frame = tk.Frame(self.frame, bg='#2a2a4e')
+        coord_frame.pack(fill=tk.X, padx=15, pady=8)
+
+        tk.Label(coord_frame, text="📍 Положение зонда:", font=('Arial', 11, 'bold'),
+                 bg='#2a2a4e', fg='#ffffff').pack(anchor=tk.W)
+
+        self.x_label = tk.Label(coord_frame, text="X: -- мм", font=('Arial', 10),
+                                bg='#2a2a4e', fg='#88aaff')
+        self.x_label.pack(anchor=tk.W, padx=15, pady=2)
+
+        self.y_label = tk.Label(coord_frame, text="Y: -- мм", font=('Arial', 10),
+                                bg='#2a2a4e', fg='#88aaff')
+        self.y_label.pack(anchor=tk.W, padx=15, pady=2)
+
+        sep = tk.Frame(self.frame, height=2, bg='#00d4ff')
+        sep.pack(fill=tk.X, padx=10, pady=8)
+
+        h_frame = tk.LabelFrame(self.frame, text="🌊 H-поляризация", font=('Arial', 10, 'bold'),
+                                bg='#2a2a4e', fg='#88ff88', bd=2, relief=tk.GROOVE)
+        h_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.magnitude_h_label = tk.Label(h_frame, text="📊 Амплитуда: -- dB", font=('Arial', 10),
+                                          bg='#2a2a4e', fg='#88ff88')
+        self.magnitude_h_label.pack(anchor=tk.W, padx=10, pady=3)
+
+        self.phase_h_label = tk.Label(h_frame, text="🌀 Фаза: -- °", font=('Arial', 10),
+                                      bg='#2a2a4e', fg='#88ff88')
+        self.phase_h_label.pack(anchor=tk.W, padx=10, pady=3)
+
+        v_frame = tk.LabelFrame(self.frame, text="🌊 V-поляризация", font=('Arial', 10, 'bold'),
+                                bg='#2a2a4e', fg='#ff8888', bd=2, relief=tk.GROOVE)
+        v_frame.pack(fill=tk.X, padx=15, pady=5)
+
+        self.magnitude_v_label = tk.Label(v_frame, text="📊 Амплитуда: -- dB", font=('Arial', 10),
+                                          bg='#2a2a4e', fg='#ff8888')
+        self.magnitude_v_label.pack(anchor=tk.W, padx=10, pady=3)
+
+        self.phase_v_label = tk.Label(v_frame, text="🌀 Фаза: -- °", font=('Arial', 10),
+                                      bg='#2a2a4e', fg='#ff8888')
+        self.phase_v_label.pack(anchor=tk.W, padx=10, pady=3)
+
+        self.freq_label = tk.Label(self.frame, text="📡 Частота: -- МГц", font=('Arial', 9),
+                                   bg='#2a2a4e', fg='#888888')
+        self.freq_label.pack(anchor=tk.W, padx=15, pady=5)
+
+        self.points_label = tk.Label(self.frame, text="📌 Всего точек: 0", font=('Arial', 9),
+                                     bg='#2a2a4e', fg='#ffaa44')
+        self.points_label.pack(anchor=tk.W, padx=15, pady=5)
+
+    def update_info(self, position, s12_h, s12_v, freq_mhz, total_points=0):
+        """Обновление информации"""
+
+        def do_update():
+            try:
+                self.x_label.config(text=f"X: {position[0]:.2f} мм")
+                self.y_label.config(text=f"Y: {position[1]:.2f} мм")
+
+                mag_h = s12_h['magnitude'][0] if len(s12_h['magnitude']) > 0 else 1e-6
+                mag_h_db = 20 * np.log10(np.maximum(abs(mag_h), 1e-6))
+                self.magnitude_h_label.config(text=f"📊 Амплитуда: {mag_h_db:.2f} dB")
+                phase_h = s12_h['phase'][0] if len(s12_h['phase']) > 0 else 0
+                self.phase_h_label.config(text=f"🌀 Фаза: {phase_h:.2f} °")
+
+                mag_v = s12_v['magnitude'][0] if len(s12_v['magnitude']) > 0 else 1e-6
+                mag_v_db = 20 * np.log10(np.maximum(abs(mag_v), 1e-6))
+                self.magnitude_v_label.config(text=f"📊 Амплитуда: {mag_v_db:.2f} dB")
+                phase_v = s12_v['phase'][0] if len(s12_v['phase']) > 0 else 0
+                self.phase_v_label.config(text=f"🌀 Фаза: {phase_v:.2f} °")
+
+                self.freq_label.config(text=f"📡 Частота: {freq_mhz:.1f} МГц")
+                if total_points > 0:
+                    self.points_label.config(text=f"📌 Всего точек: {total_points}")
+            except Exception as e:
+                print(f"Ошибка обновления информации: {e}")
+
+        self.parent.after_idle(do_update)
