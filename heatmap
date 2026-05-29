@@ -5,9 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pynanovna
 
-# ==========================================
+# =====================================================
 # НАСТРОЙКИ
-# ==========================================
+# =====================================================
 
 ARDUINO_PORT = "COM6"
 BAUDRATE = 115200
@@ -18,54 +18,214 @@ NUM_FREQ_POINTS = 101
 
 ANALYSIS_FREQ_MHZ = 200
 
+CALIBRATION_FILE = "calibration.json"
+
 USE_TEST_DATA = False
 
-# ==========================================
-# ВВОД ПАРАМЕТРОВ СКАНИРОВАНИЯ
-# ==========================================
+# =====================================================
+# КАЛИБРОВКА
+# =====================================================
 
-X_POINTS = int(input("X points: "))
-Y_POINTS = int(input("Y points: "))
+def do_calibration(vna):
 
-# ==========================================
+    steps = ["open", "short", "load", "through"]
+    names = ["OPEN", "SHORT", "LOAD", "THROUGH"]
+
+    print("\n========== VNA CALIBRATION ==========\n")
+
+    for step, name in zip(steps, names):
+
+        input(
+            f"\nConnect {name} standard and press ENTER...\n"
+        )
+
+        vna.calibration_step(step)
+
+        print(f"{name} calibration done")
+
+    print("\nCalculating calibration...")
+
+    vna.calibrate()
+
+    vna.save_calibration(CALIBRATION_FILE)
+
+    print(
+        f"\nCalibration saved to {CALIBRATION_FILE}"
+    )
+
+
+def load_or_calibrate(vna):
+
+    choice = input(
+        "\nLoad calibration [l] / "
+        "New calibration [c] / "
+        "Skip [s]: "
+    ).strip().lower()
+
+    # русская "с"
+    if choice == "с":
+        choice = "c"
+
+    if choice == "l":
+
+        vna.load_calibration(
+            CALIBRATION_FILE
+        )
+
+        print(
+            f"\nCalibration loaded from "
+            f"{CALIBRATION_FILE}"
+        )
+
+    elif choice == "c":
+
+        do_calibration(vna)
+
+    elif choice == "s":
+
+        print("\nCalibration skipped")
+
+    else:
+
+        print(
+            "\nUnknown command.\n"
+            "Starting new calibration."
+        )
+
+        do_calibration(vna)
+
+# =====================================================
+# ОБРАБОТКА S-ПАРАМЕТРОВ
+# =====================================================
+
+def convert_s_parameter_data(
+    data,
+    num_points
+):
+
+    if data is None:
+
+        return {
+            "magnitude": np.zeros(num_points),
+            "phase": np.zeros(num_points)
+        }
+
+    if (
+        isinstance(data, dict)
+        and "magnitude" in data
+        and "phase" in data
+    ):
+
+        return {
+            "magnitude": np.array(
+                data["magnitude"]
+            ),
+            "phase": np.array(
+                data["phase"]
+            )
+        }
+
+    if (
+        isinstance(
+            data,
+            (list, tuple, np.ndarray)
+        )
+        and len(data) > 0
+    ):
+
+        if isinstance(data[0], complex):
+
+            return {
+                "magnitude": np.abs(data),
+                "phase": np.angle(
+                    data,
+                    deg=True
+                )
+            }
+
+        else:
+
+            return {
+                "magnitude": np.array(data),
+                "phase": np.zeros_like(data)
+            }
+
+    return {
+        "magnitude": np.zeros(num_points),
+        "phase": np.zeros(num_points)
+    }
+
+# =====================================================
+# ВВОД ПАРАМЕТРОВ
+# =====================================================
+
+X_POINTS = int(
+    input("Enter X points: ")
+)
+
+Y_POINTS = int(
+    input("Enter Y points: ")
+)
+
+# =====================================================
 # ПОДКЛЮЧЕНИЕ ARDUINO
-# ==========================================
+# =====================================================
 
-ser = serial.Serial(ARDUINO_PORT, BAUDRATE, timeout=1)
+ser = serial.Serial(
+    ARDUINO_PORT,
+    BAUDRATE,
+    timeout=1
+)
 
 time.sleep(2)
 
-print("Arduino connected")
+print("\nArduino connected")
 
-# ==========================================
-# ИНИЦИАЛИЗАЦИЯ VNA
-# (как в full_code)
-# ==========================================
+# =====================================================
+# ЧАСТОТЫ
+# =====================================================
+
+start_freq = START_FREQ_MHZ * 1e6
+stop_freq = STOP_FREQ_MHZ * 1e6
+
+frequencies = np.linspace(
+    start_freq,
+    stop_freq,
+    NUM_FREQ_POINTS
+)
+
+freq_idx = np.argmin(
+    np.abs(
+        frequencies
+        - ANALYSIS_FREQ_MHZ * 1e6
+    )
+)
+
+# =====================================================
+# ПОДКЛЮЧЕНИЕ VNA
+# =====================================================
 
 vna = None
-frequencies = None
 
 if not USE_TEST_DATA:
 
+    print("\nConnecting VNA...")
+
     vna = pynanovna.VNA(
         vna_index=0,
-        logging_level='info'
+        logging_level="info"
     )
 
     if not vna.is_connected():
-        raise RuntimeError("VNA not connected")
 
-    print("VNA connected")
+        raise RuntimeError(
+            "VNA not connected"
+        )
+
+    print("\nVNA connected")
     print(vna.info())
 
-    start_freq = START_FREQ_MHZ * 1e6
-    stop_freq = STOP_FREQ_MHZ * 1e6
-
-    frequencies = np.linspace(
-        start_freq,
-        stop_freq,
-        NUM_FREQ_POINTS
-    )
+    print("\nSetting sweep...")
 
     vna.set_sweep(
         start=int(start_freq),
@@ -75,45 +235,71 @@ if not USE_TEST_DATA:
 
     time.sleep(0.5)
 
-    freq_idx = np.argmin(
-        np.abs(frequencies - ANALYSIS_FREQ_MHZ * 1e6)
-    )
+    # =========================================
+    # КАЛИБРОВКА
+    # =========================================
 
-# ==========================================
-# МАССИВ ДАННЫХ
-# ==========================================
+    load_or_calibrate(vna)
+
+# =====================================================
+# ГОТОВНОСТЬ К СКАНИРОВАНИЮ
+# =====================================================
+
+print(
+    "\n===================================="
+)
+print("Scanner is ready.")
+print("Place the probe.")
+print("Are you ready?")
+print("Press ENTER to start scanning.")
+print(
+    "====================================\n"
+)
+
+input()
+
+# =====================================================
+# МАССИВ ИНТЕНСИВНОСТИ
+# =====================================================
 
 intensity_map = np.full(
     (Y_POINTS, X_POINTS),
     np.nan
 )
 
-# ==========================================
-# ОТПРАВКА КОЛИЧЕСТВА ТОЧЕК
-# ==========================================
+# =====================================================
+# ОТПРАВКА ПАРАМЕТРОВ ARDUINO
+# =====================================================
 
-ser.write(f"{X_POINTS}\n".encode())
+ser.write(
+    f"{X_POINTS}\n".encode()
+)
+
 ser.flush()
 
 time.sleep(0.5)
 
-ser.write(f"{Y_POINTS}\n".encode())
+ser.write(
+    f"{Y_POINTS}\n".encode()
+)
+
 ser.flush()
 
 time.sleep(0.5)
 
-# ==========================================
+# =====================================================
 # ЗАПУСК СКАНИРОВАНИЯ
-# ==========================================
+# =====================================================
 
 ser.write(b"START\n")
+
 ser.flush()
 
-print("Scan started")
+print("\nScan started\n")
 
-# ==========================================
+# =====================================================
 # ОСНОВНОЙ ЦИКЛ
-# ==========================================
+# =====================================================
 
 while True:
 
@@ -126,9 +312,9 @@ while True:
 
     print("Arduino:", line)
 
-    # ======================================
+    # =================================================
     # ИЗМЕРЕНИЕ
-    # ======================================
+    # =================================================
 
     if line.startswith("MEASURE"):
 
@@ -143,11 +329,14 @@ while True:
         x = int(match.group(1))
         y = int(match.group(2))
 
-        print(f"Point X={x}, Y={y}")
+        print(
+            f"\nMeasuring point "
+            f"X={x}, Y={y}"
+        )
 
-        # ==================================
+        # =============================================
         # ТЕСТОВЫЕ ДАННЫЕ
-        # ==================================
+        # =============================================
 
         if USE_TEST_DATA:
 
@@ -158,9 +347,9 @@ while True:
 
             intensity = E ** 2
 
-        # ==================================
+        # =============================================
         # ИЗМЕРЕНИЕ VNA
-        # ==================================
+        # =============================================
 
         else:
 
@@ -170,47 +359,44 @@ while True:
                 result is None
                 or len(result) != 3
             ):
+
                 print("Bad sweep")
+
                 continue
 
             s11_raw, s21_raw, freqs = result
 
-            if s21_raw is None:
-                continue
+            s21 = convert_s_parameter_data(
+                s21_raw,
+                NUM_FREQ_POINTS
+            )
 
-            # ==================================
-            # КАК В full_code
-            # ==================================
-
-            if isinstance(
-                s21_raw[0],
-                complex
-            ):
-
-                magnitude = np.abs(s21_raw)
-
-            else:
-
-                magnitude = np.array(s21_raw)
-
-            E = magnitude[freq_idx]
+            E = s21["magnitude"][
+                freq_idx
+            ]
 
             intensity = np.abs(E) ** 2
 
         intensity_map[y, x] = intensity
 
-        print(f"|E|² = {intensity}")
+        print(
+            f"Intensity |E|² = "
+            f"{intensity}"
+        )
 
-    # ======================================
+    # =================================================
     # КОНЕЦ СКАНИРОВАНИЯ
-    # ======================================
+    # =================================================
 
     elif line == "SCAN FINISHED":
+
+        print("\nScan finished")
+
         break
 
-# ==========================================
+# =====================================================
 # СОХРАНЕНИЕ
-# ==========================================
+# =====================================================
 
 np.save(
     "intensity_map.npy",
@@ -223,12 +409,12 @@ np.savetxt(
     delimiter=","
 )
 
-print("Saved intensity_map.npy")
+print("\nSaved intensity_map.npy")
 print("Saved intensity_map.csv")
 
-# ==========================================
+# =====================================================
 # ТЕПЛОКАРТА
-# ==========================================
+# =====================================================
 
 plt.figure(figsize=(8, 6))
 
@@ -240,7 +426,9 @@ plt.imshow(
     cmap="jet"
 )
 
-plt.colorbar(label="|E|²")
+plt.colorbar(
+    label="|E|²"
+)
 
 plt.xlabel("X (mm)")
 plt.ylabel("Y (mm)")
@@ -257,6 +445,8 @@ plt.savefig(
 
 plt.show()
 
-print("Saved intensity_heatmap.png")
+print(
+    "\nSaved intensity_heatmap.png"
+)
 
 ser.close()
