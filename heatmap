@@ -1,0 +1,262 @@
+import re
+import time
+import serial
+import numpy as np
+import matplotlib.pyplot as plt
+import pynanovna
+
+# ==========================================
+# НАСТРОЙКИ
+# ==========================================
+
+ARDUINO_PORT = "COM6"
+BAUDRATE = 115200
+
+START_FREQ_MHZ = 100
+STOP_FREQ_MHZ = 300
+NUM_FREQ_POINTS = 101
+
+ANALYSIS_FREQ_MHZ = 200
+
+USE_TEST_DATA = False
+
+# ==========================================
+# ВВОД ПАРАМЕТРОВ СКАНИРОВАНИЯ
+# ==========================================
+
+X_POINTS = int(input("X points: "))
+Y_POINTS = int(input("Y points: "))
+
+# ==========================================
+# ПОДКЛЮЧЕНИЕ ARDUINO
+# ==========================================
+
+ser = serial.Serial(ARDUINO_PORT, BAUDRATE, timeout=1)
+
+time.sleep(2)
+
+print("Arduino connected")
+
+# ==========================================
+# ИНИЦИАЛИЗАЦИЯ VNA
+# (как в full_code)
+# ==========================================
+
+vna = None
+frequencies = None
+
+if not USE_TEST_DATA:
+
+    vna = pynanovna.VNA(
+        vna_index=0,
+        logging_level='info'
+    )
+
+    if not vna.is_connected():
+        raise RuntimeError("VNA not connected")
+
+    print("VNA connected")
+    print(vna.info())
+
+    start_freq = START_FREQ_MHZ * 1e6
+    stop_freq = STOP_FREQ_MHZ * 1e6
+
+    frequencies = np.linspace(
+        start_freq,
+        stop_freq,
+        NUM_FREQ_POINTS
+    )
+
+    vna.set_sweep(
+        start=int(start_freq),
+        stop=int(stop_freq),
+        points=NUM_FREQ_POINTS
+    )
+
+    time.sleep(0.5)
+
+    freq_idx = np.argmin(
+        np.abs(frequencies - ANALYSIS_FREQ_MHZ * 1e6)
+    )
+
+# ==========================================
+# МАССИВ ДАННЫХ
+# ==========================================
+
+intensity_map = np.full(
+    (Y_POINTS, X_POINTS),
+    np.nan
+)
+
+# ==========================================
+# ОТПРАВКА КОЛИЧЕСТВА ТОЧЕК
+# ==========================================
+
+ser.write(f"{X_POINTS}\n".encode())
+ser.flush()
+
+time.sleep(0.5)
+
+ser.write(f"{Y_POINTS}\n".encode())
+ser.flush()
+
+time.sleep(0.5)
+
+# ==========================================
+# ЗАПУСК СКАНИРОВАНИЯ
+# ==========================================
+
+ser.write(b"START\n")
+ser.flush()
+
+print("Scan started")
+
+# ==========================================
+# ОСНОВНОЙ ЦИКЛ
+# ==========================================
+
+while True:
+
+    line = ser.readline().decode(
+        errors="ignore"
+    ).strip()
+
+    if not line:
+        continue
+
+    print("Arduino:", line)
+
+    # ======================================
+    # ИЗМЕРЕНИЕ
+    # ======================================
+
+    if line.startswith("MEASURE"):
+
+        match = re.search(
+            r"X=(\d+)\s+Y=(\d+)",
+            line
+        )
+
+        if match is None:
+            continue
+
+        x = int(match.group(1))
+        y = int(match.group(2))
+
+        print(f"Point X={x}, Y={y}")
+
+        # ==================================
+        # ТЕСТОВЫЕ ДАННЫЕ
+        # ==================================
+
+        if USE_TEST_DATA:
+
+            E = (
+                np.sin(x / 3)
+                + np.cos(y / 3)
+            )
+
+            intensity = E ** 2
+
+        # ==================================
+        # ИЗМЕРЕНИЕ VNA
+        # ==================================
+
+        else:
+
+            result = vna.sweep()
+
+            if (
+                result is None
+                or len(result) != 3
+            ):
+                print("Bad sweep")
+                continue
+
+            s11_raw, s21_raw, freqs = result
+
+            if s21_raw is None:
+                continue
+
+            # ==================================
+            # КАК В full_code
+            # ==================================
+
+            if isinstance(
+                s21_raw[0],
+                complex
+            ):
+
+                magnitude = np.abs(s21_raw)
+
+            else:
+
+                magnitude = np.array(s21_raw)
+
+            E = magnitude[freq_idx]
+
+            intensity = np.abs(E) ** 2
+
+        intensity_map[y, x] = intensity
+
+        print(f"|E|² = {intensity}")
+
+    # ======================================
+    # КОНЕЦ СКАНИРОВАНИЯ
+    # ======================================
+
+    elif line == "SCAN FINISHED":
+        break
+
+# ==========================================
+# СОХРАНЕНИЕ
+# ==========================================
+
+np.save(
+    "intensity_map.npy",
+    intensity_map
+)
+
+np.savetxt(
+    "intensity_map.csv",
+    intensity_map,
+    delimiter=","
+)
+
+print("Saved intensity_map.npy")
+print("Saved intensity_map.csv")
+
+# ==========================================
+# ТЕПЛОКАРТА
+# ==========================================
+
+plt.figure(figsize=(8, 6))
+
+plt.imshow(
+    intensity_map,
+    origin="lower",
+    extent=[0, 200, 0, 150],
+    aspect="auto",
+    cmap="jet"
+)
+
+plt.colorbar(label="|E|²")
+
+plt.xlabel("X (mm)")
+plt.ylabel("Y (mm)")
+
+plt.title(
+    f"Field intensity map\n"
+    f"{ANALYSIS_FREQ_MHZ} MHz"
+)
+
+plt.savefig(
+    "intensity_heatmap.png",
+    dpi=300
+)
+
+plt.show()
+
+print("Saved intensity_heatmap.png")
+
+ser.close()
