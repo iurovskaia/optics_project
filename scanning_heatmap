@@ -1,0 +1,362 @@
+import re
+import time
+from datetime import datetime
+
+import serial
+import numpy as np
+import matplotlib.pyplot as plt
+import pynanovna
+
+
+# =====================================================
+# НАСТРОЙКИ
+# =====================================================
+
+ARDUINO_PORT = "COM10"
+BAUDRATE = 115200
+
+START_FREQ_MHZ = 8000
+STOP_FREQ_MHZ = 9500
+NUM_FREQ_POINTS = 4
+
+ANALYSIS_FREQ_MHZ = 9009
+
+CALIBRATION_FILE = "calibration.json"
+
+SCAN_X_MM = 180
+SCAN_Y_MM = 170
+
+
+# =====================================================
+# КАЛИБРОВКА
+# =====================================================
+
+def do_calibration(vna):
+    steps = ["open", "short", "load", "through"]
+    names = ["OPEN", "SHORT", "LOAD", "THROUGH"]
+
+    print("\n========== VNA CALIBRATION ==========\n")
+
+    for step, name in zip(steps, names):
+        input(f"Connect {name} standard and press ENTER...")
+        vna.calibration_step(step)
+        print(f"{name} calibration done")
+
+    print("\nCalculating calibration...")
+    vna.calibrate()
+    vna.save_calibration(CALIBRATION_FILE)
+
+    print(f"Calibration saved to {CALIBRATION_FILE}")
+
+
+def load_or_calibrate(vna):
+    choice = input(
+        "\nLoad calibration [l] / New calibration [c] / Skip [s]: "
+    ).strip().lower()
+
+    if choice == "с":  # русская буква с
+        choice = "c"
+
+    if choice == "l":
+        vna.load_calibration(CALIBRATION_FILE)
+        print(f"Calibration loaded from {CALIBRATION_FILE}")
+
+    elif choice == "c":
+        do_calibration(vna)
+
+    elif choice == "s":
+        print("Calibration skipped")
+
+    else:
+        print("Unknown command. Starting new calibration.")
+        do_calibration(vna)
+
+
+# =====================================================
+# ОБРАБОТКА S-ПАРАМЕТРОВ
+# =====================================================
+
+def convert_s_parameter_data(data, num_points):
+    if data is None:
+        return {
+            "magnitude": np.zeros(num_points),
+            "phase": np.zeros(num_points)
+        }
+
+    if isinstance(data, dict) and "magnitude" in data and "phase" in data:
+        return {
+            "magnitude": np.array(data["magnitude"]),
+            "phase": np.array(data["phase"])
+        }
+
+    if isinstance(data, (list, tuple, np.ndarray)) and len(data) > 0:
+        if isinstance(data[0], complex):
+            return {
+                "magnitude": np.abs(data),
+                "phase": np.angle(data, deg=True)
+            }
+
+        return {
+            "magnitude": np.array(data),
+            "phase": np.zeros_like(data)
+        }
+
+    return {
+        "magnitude": np.zeros(num_points),
+        "phase": np.zeros(num_points)
+    }
+
+
+# =====================================================
+# ВВОД ПАРАМЕТРОВ
+# =====================================================
+
+X_POINTS = int(input("Enter X points: "))
+Y_POINTS = int(input("Enter Y points: "))
+
+
+# =====================================================
+# ПОДКЛЮЧЕНИЕ ARDUINO
+# =====================================================
+
+ser = serial.Serial(
+    ARDUINO_PORT,
+    BAUDRATE,
+    timeout=1
+)
+
+time.sleep(2)
+
+print("\nArduino connected")
+
+
+# =====================================================
+# ПОДКЛЮЧЕНИЕ VNA
+# =====================================================
+
+start_freq = START_FREQ_MHZ * 1e6
+stop_freq = STOP_FREQ_MHZ * 1e6
+
+frequencies = np.linspace(
+    start_freq,
+    stop_freq,
+    NUM_FREQ_POINTS
+)
+
+freq_idx = np.argmin(
+    np.abs(frequencies - ANALYSIS_FREQ_MHZ * 1e6)
+)
+
+print("\nConnecting VNA...")
+
+vna = pynanovna.VNA(
+    vna_index=0,
+    logging_level="info"
+)
+
+if not vna.is_connected():
+    raise RuntimeError("VNA not connected")
+
+print("\nVNA connected")
+print(vna.info())
+
+vna.set_sweep(
+    start=int(start_freq),
+    stop=int(stop_freq),
+    points=NUM_FREQ_POINTS
+)
+
+time.sleep(0.5)
+
+load_or_calibrate(vna)
+
+
+# =====================================================
+# ПЕРЕД СТАРТОМ
+# =====================================================
+
+print("\n====================================")
+print("Scanner is ready.")
+print("Place the probe in the start position.")
+print("Are you ready?")
+print("Press ENTER to start scanning.")
+print("====================================\n")
+
+input()
+
+
+# =====================================================
+# МАССИВЫ ДАННЫХ
+# =====================================================
+
+amplitude_map = np.full((Y_POINTS, X_POINTS), np.nan)
+phase_map = np.full((Y_POINTS, X_POINTS), np.nan)
+intensity_map = np.full((Y_POINTS, X_POINTS), np.nan)
+
+
+# =====================================================
+# ОТПРАВКА ПАРАМЕТРОВ ARDUINO
+# =====================================================
+
+ser.write(f"{X_POINTS}\n".encode())
+ser.flush()
+time.sleep(0.5)
+
+ser.write(f"{Y_POINTS}\n".encode())
+ser.flush()
+time.sleep(0.5)
+
+ser.write(b"START\n")
+ser.flush()
+
+print("\nScan started\n")
+
+
+# =====================================================
+# ОСНОВНОЙ ЦИКЛ
+# =====================================================
+
+while True:
+    line = ser.readline().decode(errors="ignore").strip()
+
+    if not line:
+        continue
+
+    print("Arduino:", line)
+
+    if line.startswith("MEASURE"):
+        match = re.search(r"X=(\d+)\s+Y=(\d+)", line)
+
+        if match is None:
+            continue
+
+        x = int(match.group(1))
+        y = int(match.group(2))
+
+        print(f"\nMeasuring point X={x}, Y={y}")
+
+        result = vna.sweep()
+
+        if result is None or len(result) != 3:
+            print("Bad sweep")
+            continue
+
+        s11_raw, s21_raw, freqs = result
+
+        s21 = convert_s_parameter_data(
+            s21_raw,
+            NUM_FREQ_POINTS
+        )
+
+        amplitude = s21["magnitude"][freq_idx]
+        phase = s21["phase"][freq_idx]
+        intensity = amplitude
+
+        amplitude_map[y, x] = amplitude
+        phase_map[y, x] = phase
+        intensity_map[y, x] = intensity
+
+        print(f"Amplitude = {amplitude}")
+        print(f"Phase = {phase}")
+        print(f"Intensity |E|² = {intensity}")
+
+    elif line == "SCAN FINISHED":
+        print("\nScan finished")
+        break
+
+
+ser.close()
+
+
+# =====================================================
+# СОХРАНЕНИЕ В НОВЫЕ ФАЙЛЫ
+# =====================================================
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+amplitude_file = f"amplitude_map_{timestamp}.csv"
+phase_file = f"phase_map_{timestamp}.csv"
+intensity_file = f"intensity_map_{timestamp}.csv"
+heatmapA_file = f"intensity_heatmap_{timestamp}.png"
+heatmapPh_file = f"Phase_heatmap_{timestamp}.png"
+
+np.savetxt(
+    amplitude_file,
+    amplitude_map,
+    delimiter=","
+)
+
+np.savetxt(
+    phase_file,
+    phase_map,
+    delimiter=","
+)
+
+np.savetxt(
+    intensity_file,
+    intensity_map,
+    delimiter=","
+)
+
+print(f"\nSaved {amplitude_file}")
+print(f"Saved {phase_file}")
+print(f"Saved {intensity_file}")
+
+
+# =====================================================
+# ТЕПЛОКАРТА ИНТЕНСИВНОСТИ
+# =====================================================
+
+plt.figure(figsize=(8, 6))
+
+plt.imshow(
+    20 * np.log10(intensity_map),
+    origin="lower",
+    extent=[0, SCAN_X_MM, 0, SCAN_Y_MM],
+    aspect="auto",
+    cmap="jet"
+)
+
+plt.colorbar(label="Intensity |E|²")
+
+plt.xlabel("X (mm)")
+plt.ylabel("Y (mm)")
+
+plt.title(
+    f"Amplitude phase map\n"
+    f"{ANALYSIS_FREQ_MHZ} MHz"
+)
+
+plt.savefig(
+    heatmapA_file,
+    dpi=300
+)
+
+plt.show()
+
+plt.figure(figsize=(8, 6))
+
+plt.imshow(
+    phase_map,
+    origin="lower",
+    extent=[0, SCAN_X_MM, 0, SCAN_Y_MM],
+    aspect="auto",
+    cmap="jet"
+)
+
+plt.colorbar(label="Phase")
+
+plt.xlabel("X (mm)")
+plt.ylabel("Y (mm)")
+
+plt.title(
+    f"Field phase map\n"
+    f"{ANALYSIS_FREQ_MHZ} MHz"
+)
+
+plt.savefig(
+    heatmapPh_file,
+    dpi=300
+)
+
+plt.show()
